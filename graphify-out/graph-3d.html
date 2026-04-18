@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SpeakApp Knowledge Graph — 3D</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a0a0a;color:#eee;font-family:-apple-system,sans-serif;overflow:hidden}
+  #info{position:fixed;top:12px;left:12px;z-index:10;background:rgba(20,20,25,.85);padding:12px 16px;border-radius:10px;border:1px solid #333;max-width:340px;font-size:13px;backdrop-filter:blur(8px)}
+  #info h1{margin:0 0 6px;font-size:14px;font-weight:600;color:#9ae}
+  #info .stat{color:#888;font-size:11px}
+  #legend{position:fixed;bottom:12px;left:12px;z-index:10;background:rgba(20,20,25,.85);padding:10px 14px;border-radius:10px;border:1px solid #333;font-size:11px;max-height:60vh;overflow-y:auto;backdrop-filter:blur(8px)}
+  #legend .row{display:flex;align-items:center;gap:8px;padding:2px 0}
+  #legend .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  #hover{position:fixed;top:12px;right:12px;z-index:10;background:rgba(20,20,25,.9);padding:10px 14px;border-radius:10px;border:1px solid #444;font-size:12px;max-width:320px;display:none;backdrop-filter:blur(8px)}
+  #hover .label{font-weight:600;color:#9ae;margin-bottom:4px}
+  #hover .meta{color:#888;font-size:11px}
+  #controls{position:fixed;bottom:12px;right:12px;z-index:10;background:rgba(20,20,25,.85);padding:10px 14px;border-radius:10px;border:1px solid #333;font-size:11px;color:#aaa;backdrop-filter:blur(8px)}
+  #graph{width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<div id="info">
+  <h1>SpeakApp · 3D Knowledge Graph</h1>
+  <div class="stat" id="stats">loading…</div>
+</div>
+<div id="hover"></div>
+<div id="legend"></div>
+<div id="controls">
+  <div>Drag: rotate · Scroll: zoom · Right-drag: pan</div>
+  <div>Click node: focus · Hover: details</div>
+</div>
+<div id="graph"></div>
+
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three-spritetext@1.8.2/dist/three-spritetext.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
+<script>
+const COMMUNITY_LABELS = {
+  "0":"App Shell & Auth Routing","1":"UI Primitives","2":"Server Backend",
+  "3":"Text-to-Speech Pipeline","4":"Deployment & Project Meta","5":"Realtime Socket Pages",
+  "6":"HTML Entry & Assets","7":"Translation Service","8":"WebRTC TURN Config",
+  "9":"LinkedIn Badge","10":"Language Selector","11":"Transcript Panel","12":"Loading Page",
+  "13":"Join Page","14":"Host Setup","15":"Tailwind Config","16":"Vite Config",
+  "17":"PostCSS Config","18":"Main Entry","19":"Languages Config","20":"API Config"
+};
+
+const PALETTE = ["#ff6b6b","#4ecdc4","#ffd93d","#a78bfa","#6ee7b7","#fb7185","#60a5fa",
+  "#fbbf24","#f472b6","#34d399","#818cf8","#fb923c","#22d3ee","#c084fc","#f87171",
+  "#a3e635","#2dd4bf","#e879f9","#facc15","#38bdf8","#fda4af"];
+
+function esc(s){
+  return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function setText(el, text){ el.textContent = text; }
+function mkDiv(cls, text){
+  const d = document.createElement('div');
+  if(cls) d.className = cls;
+  if(text != null) d.textContent = text;
+  return d;
+}
+
+fetch('graph.json').then(r=>r.json()).then(data=>{
+  const nodes = data.nodes.map(n=>({
+    id:n.id, label:n.label||n.id, community:n.community ?? 0,
+    source_file:n.source_file||'', file_type:n.file_type||'',
+    val: 8 + 3*(data.links.filter(l=>l.source===n.id||l.target===n.id).length)
+  }));
+  const links = data.links.map(l=>({
+    source:l.source, target:l.target,
+    relation:l.relation||'', confidence:l.confidence||''
+  }));
+
+  const commIds = [...new Set(nodes.map(n=>n.community))].sort((a,b)=>a-b);
+  const color = c => PALETTE[commIds.indexOf(c) % PALETTE.length];
+
+  setText(document.getElementById('stats'),
+    `${nodes.length} nodes · ${links.length} edges · ${commIds.length} communities`);
+
+  const legend = document.getElementById('legend');
+  const commSizes = {};
+  nodes.forEach(n=>commSizes[n.community]=(commSizes[n.community]||0)+1);
+  commIds.slice().sort((a,b)=>commSizes[b]-commSizes[a]).forEach(c=>{
+    const row = mkDiv('row');
+    const dot = mkDiv('dot');
+    dot.style.background = color(c);
+    row.appendChild(dot);
+    const lbl = document.createElement('div');
+    lbl.textContent = (COMMUNITY_LABELS[c]||'C'+c);
+    const cnt = document.createElement('span');
+    cnt.style.color = '#666';
+    cnt.textContent = ' (' + commSizes[c] + ')';
+    lbl.appendChild(cnt);
+    row.appendChild(lbl);
+    legend.appendChild(row);
+  });
+
+  const hover = document.getElementById('hover');
+
+  const Graph = ForceGraph3D()(document.getElementById('graph'))
+    .backgroundColor('#0a0a0a')
+    .graphData({nodes, links})
+    .nodeLabel(n=>{
+      // tooltip: escape all interpolated strings
+      const c = color(n.community);
+      return '<div style="background:rgba(10,10,10,.9);padding:6px 10px;border-radius:6px;border:1px solid '+esc(c)+';color:#fff">'+esc(n.label)+'</div>';
+    })
+    .nodeColor(n=>color(n.community))
+    .nodeVal('val')
+    .nodeOpacity(0.95)
+    .nodeResolution(16)
+    .nodeThreeObjectExtend(true)
+    .nodeThreeObject(n=>{
+      const sprite = new SpriteText(n.label);
+      sprite.color = '#ffffff';
+      sprite.backgroundColor = 'rgba(10,10,10,0.92)';
+      sprite.padding = [4, 6];
+      sprite.borderRadius = 4;
+      sprite.borderColor = color(n.community);
+      sprite.borderWidth = 0.8;
+      sprite.textHeight = 5;
+      // radius of sphere in 3d-force-graph ≈ cbrt(val)*4; push label clearly above
+      const radius = Math.cbrt(n.val) * 4;
+      sprite.position.y = radius + 6;
+      sprite.material.depthTest = false;
+      sprite.material.depthWrite = false;
+      sprite.renderOrder = 999;
+      return sprite;
+    })
+    .linkColor(l=>l.confidence==='EXTRACTED'?'#4ecdc4':l.confidence==='AMBIGUOUS'?'#f87171':'#666')
+    .linkOpacity(0.45)
+    .linkWidth(l=>l.confidence==='EXTRACTED'?1.2:0.6)
+    .linkDirectionalParticles(l=>l.confidence==='EXTRACTED'?2:0)
+    .linkDirectionalParticleSpeed(0.006)
+    .linkDirectionalParticleWidth(1.5)
+    .linkDirectionalParticleColor(l=>{
+      const srcId = l.source.id || l.source;
+      const n = nodes.find(x=>x.id===srcId);
+      return color(n ? n.community : 0);
+    })
+    .onNodeClick(node=>{
+      const dist = 80;
+      const r = dist / Math.hypot(node.x,node.y,node.z);
+      Graph.cameraPosition({x:node.x*(1+r), y:node.y*(1+r), z:node.z*(1+r)}, node, 1400);
+    })
+    .onNodeHover(node=>{
+      if(!node){ hover.style.display='none'; return; }
+      hover.style.display='block';
+      while(hover.firstChild) hover.removeChild(hover.firstChild);
+      hover.appendChild(mkDiv('label', node.label));
+      hover.appendChild(mkDiv('meta', COMMUNITY_LABELS[node.community]||'C'+node.community));
+      hover.appendChild(mkDiv('meta', node.source_file));
+      hover.appendChild(mkDiv('meta', 'degree: ' + ((node.val-8)/3)));
+    });
+
+  Graph.d3Force('charge').strength(-260);
+  Graph.d3Force('link').distance(70);
+});
+</script>
+</body>
+</html>
