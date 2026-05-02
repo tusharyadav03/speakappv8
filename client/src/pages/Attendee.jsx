@@ -163,6 +163,22 @@ export default function Attendee({ room, user, onExit }) {
       pc.current = c;
       ms.getTracks().forEach((t) => c.addTrack(t, ms));
 
+      // ── Receive host's silent reference track for echo cancellation ──
+      // Host sends a silent audio track back. We play it at volume 0
+      // through a hidden audio element. This enables the browser's AEC
+      // pipeline to detect and cancel acoustic echo from host's speakers.
+      c.ontrack = (e) => {
+        try {
+          const refAudio = document.createElement("audio");
+          refAudio.srcObject = e.streams[0];
+          refAudio.volume = 0; // inaudible — only for AEC reference
+          refAudio.muted = false; // must be unmuted for AEC to work
+          refAudio.play().catch(() => {});
+          // Store for cleanup
+          c._refAudio = refAudio;
+        } catch {}
+      };
+
       c.onicecandidate = (e) => {
         if (e.candidate)
           s.current.emit("webrtc_ice", {
@@ -214,6 +230,7 @@ export default function Attendee({ room, user, onExit }) {
       stream.current = null;
     }
     if (pc.current) {
+      try { if (pc.current._refAudio) { pc.current._refAudio.srcObject = null; } } catch {}
       pc.current.close();
       pc.current = null;
     }

@@ -178,11 +178,34 @@ export default function HostDash({ room, onEnd }) {
     sk.on("webrtc_offer", async ({ from, offer }) => {
       try {
         if (pc.current) {
+          try { if (pc.current._silentCtx) pc.current._silentCtx.close(); } catch {}
           pc.current.close();
           pc.current = null;
         }
         const c = new RTCPeerConnection(ICE);
         pc.current = c;
+
+        // ── KEY: Send silent audio back to guest for echo cancellation ──
+        // WebRTC AEC only fully activates with bidirectional audio.
+        // Without this, guest's browser can't cancel acoustic echo from
+        // host speakers because it has no reference signal.
+        try {
+          const silentCtx = new AudioContext();
+          const osc = silentCtx.createOscillator();
+          const gain = silentCtx.createGain();
+          gain.gain.value = 0; // completely silent
+          osc.connect(gain);
+          const dest = silentCtx.createMediaStreamDestination();
+          gain.connect(dest);
+          osc.start();
+          dest.stream.getTracks().forEach((t) => c.addTrack(t, dest.stream));
+          // Store for cleanup
+          c._silentCtx = silentCtx;
+        } catch (silentErr) {
+          console.warn("Silent track failed, AEC may not work:", silentErr.message);
+          // Fallback: add transceiver for bidirectional negotiation
+          try { c.addTransceiver("audio", { direction: "sendrecv" }); } catch {}
+        }
 
         c.ontrack = (e) => {
           const el = audio.current;
@@ -257,6 +280,7 @@ export default function HostDash({ room, onEnd }) {
         "webrtc_ice",
       ].forEach((e) => sk.off(e));
       if (pc.current) {
+        try { if (pc.current._silentCtx) pc.current._silentCtx.close(); } catch {}
         pc.current.close();
         pc.current = null;
       }
