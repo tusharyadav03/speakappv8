@@ -185,28 +185,6 @@ export default function HostDash({ room, onEnd }) {
         const c = new RTCPeerConnection(ICE);
         pc.current = c;
 
-        // ── KEY: Send silent audio back to guest for echo cancellation ──
-        // WebRTC AEC only fully activates with bidirectional audio.
-        // Without this, guest's browser can't cancel acoustic echo from
-        // host speakers because it has no reference signal.
-        try {
-          const silentCtx = new AudioContext();
-          const osc = silentCtx.createOscillator();
-          const gain = silentCtx.createGain();
-          gain.gain.value = 0; // completely silent
-          osc.connect(gain);
-          const dest = silentCtx.createMediaStreamDestination();
-          gain.connect(dest);
-          osc.start();
-          dest.stream.getTracks().forEach((t) => c.addTrack(t, dest.stream));
-          // Store for cleanup
-          c._silentCtx = silentCtx;
-        } catch (silentErr) {
-          console.warn("Silent track failed, AEC may not work:", silentErr.message);
-          // Fallback: add transceiver for bidirectional negotiation
-          try { c.addTransceiver("audio", { direction: "sendrecv" }); } catch {}
-        }
-
         c.ontrack = (e) => {
           const el = audio.current;
           const ms = e.streams[0];
@@ -251,8 +229,36 @@ export default function HostDash({ room, onEnd }) {
           }
         };
 
+        // MUST set remote description FIRST so PeerConnection knows the media layout
         await c.setRemoteDescription(new RTCSessionDescription(offer));
         if (pc.current !== c) return; // replaced during async
+
+        // ── Add silent audio track for echo cancellation ──
+        // Done AFTER setRemoteDescription so it uses the existing audio m-line
+        // (sendrecv from guest's offer) instead of creating a conflicting one.
+        // This makes connection bidirectional → guest's AEC can cancel echo.
+        try {
+          const silentCtx = new AudioContext();
+          const osc = silentCtx.createOscillator();
+          const gain = silentCtx.createGain();
+          gain.gain.value = 0;
+          osc.connect(gain);
+          const dest = silentCtx.createMediaStreamDestination();
+          gain.connect(dest);
+          osc.start();
+          // Find the existing audio transceiver and replace its sender track
+          const audioTransceiver = c.getTransceivers().find(
+            (t) => t.receiver.track?.kind === "audio"
+          );
+          if (audioTransceiver && audioTransceiver.sender) {
+            await audioTransceiver.sender.replaceTrack(dest.stream.getTracks()[0]);
+            audioTransceiver.direction = "sendrecv";
+          }
+          c._silentCtx = silentCtx;
+        } catch (silentErr) {
+          console.warn("Silent track setup failed:", silentErr.message);
+        }
+
         const ans = await c.createAnswer();
         await c.setLocalDescription(ans);
         sk.emit("webrtc_answer", { roomId: room.id, answer: ans, to: from });
