@@ -14,7 +14,6 @@ import {
   UserMinus,
   Monitor,
   Link as LinkIcon,
-  MapPin,
 } from "lucide-react";
 import { getSocket } from "../config/socket";
 import { ICE } from "../config/webrtc";
@@ -40,7 +39,6 @@ export default function HostDash({ room, onEnd }) {
   const [transcript, setTranscript] = useState([]);
   const [transcribing, setTranscribing] = useState(false);
   const [speakerSR, setSpeakerSR] = useState(false); // guest is self-transcribing
-  const [sameRoom, setSameRoom] = useState(false);   // host+guest in same physical room
   const audio = useRef(null);
   const remoteStream = useRef(null);
   const pc = useRef(null);
@@ -433,35 +431,10 @@ export default function HostDash({ room, onEnd }) {
         </div>
         <div className="flex items-center gap-1.5">
           <Btn
-            v={sameRoom ? "accent" : "outline"}
-            sz="xs"
-            title={sameRoom ? "Same room mode ON — audio muted to prevent echo" : "Enable if speaker is in the same room (prevents echo)"}
-            onClick={() => {
-              const next = !sameRoom;
-              setSameRoom(next);
-              if (next) {
-                // Auto-mute audio to prevent echo feedback loop
-                setAudioOn(false);
-                if (audio.current) audio.current.muted = true;
-              }
-            }}
-          >
-            <MapPin size={14} />
-            <span className="hidden sm:inline">{sameRoom ? "Same room" : "Remote"}</span>
-          </Btn>
-          <Btn
             v={audioOn ? "primary" : "outline"}
             sz="xs"
-            title={sameRoom ? "Audio muted (same room mode)" : audioOn ? "Mute monitor" : "Unmute monitor"}
+            title={audioOn ? "Mute monitor" : "Unmute monitor"}
             onClick={() => {
-              if (sameRoom) {
-                // Warn user about echo risk
-                if (window.confirm("Unmuting while in same room mode may cause echo. Continue?")) {
-                  setSameRoom(false);
-                  enableAudio();
-                }
-                return;
-              }
               if (!audioOn) enableAudio();
               else {
                 setAudioOn(false);

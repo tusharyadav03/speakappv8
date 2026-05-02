@@ -146,78 +146,22 @@ export default function Attendee({ room, user, onExit }) {
   /* ─── WebRTC ─── */
   const startRTC = useCallback(async () => {
     try {
+      // Use raw browser stream — browser's built-in AEC handles echo cancellation.
+      // DO NOT route through Web Audio API (AudioContext → MediaStreamDestination)
+      // because that creates a new stream that bypasses browser echo cancellation.
       const ms = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: { ideal: true },
-          noiseSuppression: { ideal: true },
-          autoGainControl: { ideal: true },
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
           channelCount: 1,
-          sampleRate: { ideal: 16000 }, // speech-optimized sample rate
-          latency: { ideal: 0.01 },     // low latency for real-time
         },
       });
       stream.current = ms;
 
-      let streamToSend = ms;
-      try {
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        window._speakAppAudioCtx = audioCtx;
-
-        if (audioCtx.state === "suspended") await audioCtx.resume();
-
-        if (audioCtx.state === "running") {
-          const source = audioCtx.createMediaStreamSource(ms);
-
-          // High-pass filter: remove low-frequency rumble + speaker bleed
-          const highpass = audioCtx.createBiquadFilter();
-          highpass.type = "highpass";
-          highpass.frequency.value = 150; // raised from 100 to cut more room echo
-          highpass.Q.value = 0.8;
-
-          // Noise gate via aggressive compressor — kills low-level echo/feedback
-          // Anything below -35dB gets crushed (speaker bleed is typically quiet)
-          const noiseGate = audioCtx.createDynamicsCompressor();
-          noiseGate.threshold.value = -35;   // gate threshold — echo below this gets killed
-          noiseGate.knee.value = 2;          // hard knee = sharp gate
-          noiseGate.ratio.value = 20;        // very high ratio = gate behavior
-          noiseGate.attack.value = 0.001;    // fast attack — don't let echo through
-          noiseGate.release.value = 0.05;    // fast release — open quick when speaking
-
-          // Main compressor for voice normalization
-          const compressor = audioCtx.createDynamicsCompressor();
-          compressor.threshold.value = -45;
-          compressor.knee.value = 10;
-          compressor.ratio.value = 8;
-          compressor.attack.value = 0.003;
-          compressor.release.value = 0.15;
-
-          // Notch filter: cut common speaker resonance frequencies
-          const notch = audioCtx.createBiquadFilter();
-          notch.type = "notch";
-          notch.frequency.value = 250; // common room echo frequency
-          notch.Q.value = 2;
-
-          const makeupGain = audioCtx.createGain();
-          makeupGain.gain.value = 1.4;
-
-          const dest = audioCtx.createMediaStreamDestination();
-          // Chain: mic → highpass → noise gate → notch → compressor → gain → output
-          source.connect(highpass);
-          highpass.connect(noiseGate);
-          noiseGate.connect(notch);
-          notch.connect(compressor);
-          compressor.connect(makeupGain);
-          makeupGain.connect(dest);
-
-          streamToSend = dest.stream;
-        }
-      } catch (chainErr) {
-        console.warn("Audio chain failed, using raw mic:", chainErr.message);
-      }
-
       const c = new RTCPeerConnection(ICE);
       pc.current = c;
-      streamToSend.getTracks().forEach((t) => c.addTrack(t, streamToSend));
+      ms.getTracks().forEach((t) => c.addTrack(t, ms));
 
       c.onicecandidate = (e) => {
         if (e.candidate)
@@ -273,12 +217,6 @@ export default function Attendee({ room, user, onExit }) {
       pc.current.close();
       pc.current = null;
     }
-    try {
-      if (window._speakAppAudioCtx) {
-        window._speakAppAudioCtx.close();
-        window._speakAppAudioCtx = null;
-      }
-    } catch {}
   }, [stopSR]);
 
   /* ─── socket wiring ─── */
