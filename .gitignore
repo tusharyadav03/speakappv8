@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+build/
+client/dist/
+
+# Vite
+client/vite.config.js.timestamp-*
+**/vite.config.*.timestamp-*
+
+# macOS metadata
+.DS_Store
+._*
+
+# Editor / tools
+.obsidian/
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Misc
+*.pid
+*.seed
+coverage/
+.cache/

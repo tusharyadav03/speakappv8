@@ -57,8 +57,14 @@ export default function Attendee({ room, user, onExit }) {
   /* ─── Speaker-side SR ─── */
   const startSR = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return;
+    if (!SR) {
+      console.warn("SpeechRecognition not supported in this browser");
+      return;
+    }
     if (recognition.current) return;
+
+    let errorRetries = 0;
+    const MAX_RETRIES = 8;
 
     const recog = new SR();
     recog.continuous = true;
@@ -67,6 +73,7 @@ export default function Attendee({ room, user, onExit }) {
     recog.maxAlternatives = 1;
 
     recog.onresult = (event) => {
+      errorRetries = 0; // reset on success
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
           const text = event.results[i][0].transcript.trim();
@@ -82,11 +89,22 @@ export default function Attendee({ room, user, onExit }) {
 
     recog.onerror = (e) => {
       if (["no-speech", "audio-capture", "network"].includes(e.error)) {
+        errorRetries++;
+        if (errorRetries > MAX_RETRIES) {
+          console.warn("Guest SR max retries reached");
+          recognition.current = null;
+          s.current.emit("sr_active", { roomId: room.id, active: false });
+          return;
+        }
         setTimeout(() => {
           try {
             if (recognition.current === recog) recog.start();
           } catch {}
-        }, 500);
+        }, 500 + errorRetries * 200);
+      }
+      if (e.error === "not-allowed") {
+        recognition.current = null;
+        s.current.emit("sr_active", { roomId: room.id, active: false });
       }
     };
 
@@ -101,6 +119,8 @@ export default function Attendee({ room, user, onExit }) {
     try {
       recog.start();
       recognition.current = recog;
+      // Tell server guest SR is active — host mic should be suppressed
+      s.current.emit("sr_active", { roomId: room.id, active: true });
     } catch (err) {
       console.error("SR start failed:", err);
     }
@@ -113,8 +133,10 @@ export default function Attendee({ room, user, onExit }) {
       try {
         r.stop();
       } catch {}
+      // Tell server guest SR stopped
+      s.current.emit("sr_active", { roomId: room.id, active: false });
     }
-  }, []);
+  }, [room.id]);
 
   const myId = s.current?.id;
   const inQueue = room.queue?.some((x) => x.id === myId);
@@ -183,20 +205,38 @@ export default function Attendee({ room, user, onExit }) {
       };
 
       c.oniceconnectionstatechange = () => {
+        if (pc.current !== c) return; // stale connection
         const state = c.iceConnectionState;
-        if (state === "failed") c.restartIce();
+        if (state === "failed") {
+          console.warn("ICE failed, restarting...");
+          c.restartIce();
+        }
+        if (state === "disconnected") {
+          // Give 5s to recover before restarting
+          setTimeout(() => {
+            if (pc.current === c && c.iceConnectionState === "disconnected") {
+              console.warn("ICE still disconnected, restarting...");
+              c.restartIce();
+            }
+          }, 5000);
+        }
       };
 
       const offer = await c.createOffer();
+      if (pc.current !== c) return; // connection was replaced during async
       await c.setLocalDescription(offer);
       s.current.emit("webrtc_offer", { roomId: room.id, offer });
 
       startSR();
     } catch (err) {
       console.error("Microphone/WebRTC error:", err);
-      alert(
-        "Microphone access required. Please allow microphone permission and try again."
-      );
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        alert("Microphone access was denied. Please allow microphone permission in your browser settings and try again.");
+      } else if (err.name === "NotFoundError") {
+        alert("No microphone found. Please connect a microphone and try again.");
+      } else {
+        alert("Could not access microphone. Please check your browser settings and try again.");
+      }
     }
   }, [room.id, startSR]);
 
@@ -276,7 +316,7 @@ export default function Attendee({ room, user, onExit }) {
     );
     sk.on("webrtc_answer", async ({ answer }) => {
       try {
-        if (pc.current)
+        if (pc.current && pc.current.signalingState !== "closed")
           await pc.current.setRemoteDescription(new RTCSessionDescription(answer));
       } catch (err) {
         console.error("WebRTC answer error:", err);
@@ -284,10 +324,20 @@ export default function Attendee({ room, user, onExit }) {
     });
     sk.on("webrtc_ice", async ({ candidate }) => {
       try {
-        if (pc.current && candidate)
+        if (pc.current && pc.current.signalingState !== "closed" && candidate)
           await pc.current.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch {}
+      } catch (err) {
+        console.warn("ICE candidate error:", err.message);
+      }
     });
+    // Handle socket reconnection — re-join room
+    const onReconnect = () => {
+      if (room.id) {
+        sk.emit("join_room_attendee", { roomId: room.id, user });
+      }
+    };
+    sk.on("connect", onReconnect);
+
     return () => {
       [
         "floor_granted",
@@ -300,11 +350,12 @@ export default function Attendee({ room, user, onExit }) {
         "transcript_update",
         "webrtc_answer",
         "webrtc_ice",
+        "connect",
       ].forEach((e) => sk.off(e));
       if (countdownT) clearInterval(countdownT);
       stopRTC();
     };
-  }, [startRTC, stopRTC]);
+  }, [startRTC, stopRTC, room.id, user]);
 
   const reactions = ["🔥", "❤️", "👍", "👏", "🎉", "💡"];
 

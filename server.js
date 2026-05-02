@@ -551,7 +551,8 @@ io.on('connection', (socket) => {
     const room = {
       id: code, name: data?.name || 'Untitled', hostSocketId: socket.id,
       hostName: data?.hostName || 'Host', status: 'active',
-      queue: [], currentSpeaker: null, attendees: new Map(), transcript: []
+      queue: [], currentSpeaker: null, attendees: new Map(), transcript: [],
+      speakerSRActive: false
     };
     rooms.set(code, room);
     events.push({ code, name: room.name, host: room.hostName, ts: new Date() });
@@ -618,17 +619,24 @@ io.on('connection', (socket) => {
     const room = getRoom(roomId);
     if (!room) return;
     const entry = room.queue.find(q => q.id === socket.id);
-    if (entry) { entry.question = text || ''; io.to(room.id).emit('room_data', roomJSON(room)); }
+    if (entry) {
+      // Apply profanity filter to submitted questions
+      const { text: cleanText } = filterProfanity(text || '');
+      entry.question = cleanText;
+      io.to(room.id).emit('room_data', roomJSON(room));
+    }
   });
 
   socket.on('grant_floor', ({ roomId, userId }) => {
     const room = getRoom(roomId);
-    if (!room || room.currentSpeaker) return;
+    if (!room || room.currentSpeaker || socket.id !== room.hostSocketId) return;
     const idx = room.queue.findIndex(q => q.id === userId);
     if (idx < 0) return;
     room.currentSpeaker = room.queue.splice(idx, 1)[0];
+    room.speakerSRActive = false; // reset for new speaker
     io.to(room.id).emit('room_data', roomJSON(room));
     io.to(userId).emit('floor_granted');
+    io.to(room.hostSocketId).emit('speaker_sr_status', { active: false });
     console.log(`🎤 ${room.currentSpeaker.name} speaking in ${room.id}`);
   });
 
@@ -637,6 +645,8 @@ io.on('connection', (socket) => {
     if (!room || !room.currentSpeaker) return;
     const speaker = room.currentSpeaker;
     room.currentSpeaker = null;
+    room.speakerSRActive = false;
+    io.to(room.hostSocketId).emit('speaker_sr_status', { active: false });
     io.to(room.id).emit('room_data', roomJSON(room));
     io.to(room.id).emit('speech_ended', { speakerName: speaker.name });
     // Notify the speaker they can request follow-up (re-join queue)
@@ -665,6 +675,8 @@ io.on('connection', (socket) => {
     const speakerId = room.currentSpeaker.id;
     const speakerName = room.currentSpeaker.name;
     room.currentSpeaker = null;
+    room.speakerSRActive = false;
+    io.to(room.hostSocketId).emit('speaker_sr_status', { active: false });
     io.to(speakerId).emit('speech_ended', { speakerName });
     io.to(speakerId).emit('removed_from_speaking');
     io.to(room.id).emit('room_data', roomJSON(room));
@@ -729,23 +741,44 @@ io.on('connection', (socket) => {
     io.to(room.id).emit('transcript_update', entry);
   });
 
+  // Guest signals their SpeechRecognition is active (so host mic is suppressed)
+  socket.on('sr_active', ({ roomId, active }) => {
+    const room = getRoom(roomId);
+    if (!room) return;
+    // Only the current speaker can set this flag
+    if (room.currentSpeaker?.id === socket.id) {
+      room.speakerSRActive = !!active;
+      // Notify host so UI can update
+      io.to(room.hostSocketId).emit('speaker_sr_status', { active: room.speakerSRActive });
+      console.log(`🎙️ Speaker SR ${active ? 'ON' : 'OFF'} in ${roomId}`);
+    }
+  });
+
   // Speech-to-text from speaker's phone or host
   socket.on('transcript_send', ({ roomId, text, speaker }) => {
     const room = getRoom(roomId);
     if (!room || !text) return;
-    
+
+    // KEY FIX: If guest is self-transcribing, ignore host's mic transcripts
+    // Guest's phone mic = clean source; host mic = degraded room audio
+    const isHost = socket.id === room.hostSocketId;
+    if (isHost && room.speakerSRActive && room.currentSpeaker) {
+      // Host mic transcript ignored — guest is sending clean transcripts
+      return;
+    }
+
     // Filter profanity
     const { text: cleanText, beeped } = filterProfanity(text);
     if (beeped) console.log(`🚫 Profanity filtered [${roomId}]: "${text}" → "${cleanText}"`);
     else console.log(`📝 Transcript [${roomId}]: ${speaker}: ${text}`);
-    
-    const entry = { 
-      id: Date.now(), 
-      speaker: speaker || room.currentSpeaker?.name || 'Speaker', 
+
+    const entry = {
+      id: Date.now(),
+      speaker: speaker || room.currentSpeaker?.name || 'Speaker',
       text: cleanText,
       originalText: beeped ? text : undefined, // send original for translation only if beeped
       beeped,
-      timestamp: Date.now() 
+      timestamp: Date.now()
     };
     room.transcript.push(entry);
     if (room.transcript.length > 100) room.transcript = room.transcript.slice(-100);
@@ -765,7 +798,13 @@ io.on('connection', (socket) => {
     } else {
       room.attendees.delete(socket.id);
       room.queue = room.queue.filter(q => q.id !== socket.id);
-      if (room.currentSpeaker?.id === socket.id) room.currentSpeaker = null;
+      if (room.currentSpeaker?.id === socket.id) {
+        const speakerName = room.currentSpeaker.name;
+        room.currentSpeaker = null;
+        room.speakerSRActive = false;
+        io.to(room.hostSocketId).emit('speaker_sr_status', { active: false });
+        io.to(room.id).emit('speech_ended', { speakerName });
+      }
       io.to(room.id).emit('room_data', roomJSON(room));
     }
   });

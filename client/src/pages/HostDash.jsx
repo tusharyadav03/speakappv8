@@ -38,6 +38,7 @@ export default function HostDash({ room, onEnd }) {
   const [audioBlocked, setAudioBlocked] = useState(false);
   const [transcript, setTranscript] = useState([]);
   const [transcribing, setTranscribing] = useState(false);
+  const [speakerSR, setSpeakerSR] = useState(false); // guest is self-transcribing
   const audio = useRef(null);
   const remoteStream = useRef(null);
   const pc = useRef(null);
@@ -65,8 +66,14 @@ export default function HostDash({ room, onEnd }) {
   /* ────────────── host SR (moderator mic) ────────────── */
   const startTranscription = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return;
+    if (!SR) {
+      alert("Speech recognition is not supported in this browser. Try Chrome.");
+      return;
+    }
     if (recognition.current) return;
+
+    let errorRetries = 0;
+    const MAX_RETRIES = 5;
 
     const recog = new SR();
     recog.continuous = true;
@@ -75,6 +82,7 @@ export default function HostDash({ room, onEnd }) {
     recog.maxAlternatives = 1;
 
     recog.onresult = (event) => {
+      errorRetries = 0; // reset on successful result
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
           const text = event.results[i][0].transcript.trim();
@@ -91,13 +99,21 @@ export default function HostDash({ room, onEnd }) {
 
     recog.onerror = (e) => {
       if (["no-speech", "audio-capture", "network"].includes(e.error)) {
+        errorRetries++;
+        if (errorRetries > MAX_RETRIES) {
+          console.warn("SR max retries reached, stopping");
+          recognition.current = null;
+          setTranscribing(false);
+          return;
+        }
         setTimeout(() => {
           try {
-            if (recognition.current) recog.start();
+            if (recognition.current === recog) recog.start();
           } catch {}
-        }, 500);
+        }, 500 + errorRetries * 200);
       }
       if (e.error === "not-allowed") {
+        recognition.current = null;
         setTranscribing(false);
         alert("Microphone permission needed for live transcription.");
       }
@@ -134,12 +150,24 @@ export default function HostDash({ room, onEnd }) {
   const hasPermission = useRef(false);
   useEffect(() => {
     if (room.currentSpeaker && recognition.current) stopTranscription();
+    // Reset guest SR status when speaker changes
+    if (!room.currentSpeaker) setSpeakerSR(false);
   }, [room.currentSpeaker?.id, stopTranscription]);
 
   /* ────────────── socket + webrtc wiring ────────────── */
   useEffect(() => {
     const sk = s.current;
     sk.on("followup_signal", ({ speakerName }) => setFollowUp(speakerName));
+    sk.on("speaker_sr_status", ({ active }) => {
+      setSpeakerSR(active);
+      // Auto-stop host transcription when guest starts self-transcribing
+      if (active && recognition.current) {
+        const r = recognition.current;
+        recognition.current = null;
+        try { r.stop(); } catch {}
+        setTranscribing(false);
+      }
+    });
     sk.on("reaction_received", (emoji) => {
       const id = Date.now() + Math.random();
       setRxns((p) => [...p, { id, emoji, left: Math.random() * 80 + 10 }]);
@@ -184,11 +212,24 @@ export default function HostDash({ room, onEnd }) {
         };
 
         c.oniceconnectionstatechange = () => {
+          if (pc.current !== c) return;
           const state = c.iceConnectionState;
-          if (state === "failed") c.restartIce();
+          if (state === "failed") {
+            console.warn("Host ICE failed, restarting...");
+            c.restartIce();
+          }
+          if (state === "disconnected") {
+            setTimeout(() => {
+              if (pc.current === c && c.iceConnectionState === "disconnected") {
+                console.warn("Host ICE still disconnected, restarting...");
+                c.restartIce();
+              }
+            }, 5000);
+          }
         };
 
         await c.setRemoteDescription(new RTCSessionDescription(offer));
+        if (pc.current !== c) return; // replaced during async
         const ans = await c.createAnswer();
         await c.setLocalDescription(ans);
         sk.emit("webrtc_answer", { roomId: room.id, answer: ans, to: from });
@@ -199,14 +240,17 @@ export default function HostDash({ room, onEnd }) {
 
     sk.on("webrtc_ice", async ({ candidate }) => {
       try {
-        if (pc.current && candidate)
+        if (pc.current && pc.current.signalingState !== "closed" && candidate)
           await pc.current.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch {}
+      } catch (err) {
+        console.warn("Host ICE candidate error:", err.message);
+      }
     });
 
     return () => {
       [
         "followup_signal",
+        "speaker_sr_status",
         "reaction_received",
         "transcript_update",
         "webrtc_offer",
@@ -332,8 +376,8 @@ export default function HostDash({ room, onEnd }) {
         </div>
       )}
 
-      {/* ────────── Host self-transcribe prompt ────────── */}
-      {!room.currentSpeaker && !transcribing && (
+      {/* ────────── Host self-transcribe prompt (only between speakers) ────────── */}
+      {!room.currentSpeaker && !transcribing && !speakerSR && (
         <div
           className="px-4 py-2.5 flex items-center justify-center gap-4 shrink-0 border-b"
           style={{
@@ -401,19 +445,25 @@ export default function HostDash({ room, onEnd }) {
             {audioOn ? <Volume2 size={14} /> : <VolumeX size={14} />}
           </Btn>
           <Btn
-            v={transcribing ? "live" : "outline"}
+            v={transcribing ? "live" : speakerSR ? "accent" : "outline"}
             sz="xs"
-            disabled={!room.currentSpeaker && !transcribing}
+            disabled={speakerSR || (!room.currentSpeaker && !transcribing)}
+            title={speakerSR ? "Guest is self-transcribing (using their mic)" : "Transcribe using your mic"}
             onClick={() => {
               if (transcribing) stopTranscription();
-              else if (room.currentSpeaker) {
+              else if (room.currentSpeaker && !speakerSR) {
                 hasPermission.current = true;
                 startTranscription();
               }
             }}
           >
             <MessageSquare size={14} />
-            {transcribing ? (
+            {speakerSR ? (
+              <>
+                <Dot kind="live" pulse size={6} />
+                <span className="hidden sm:inline">Guest mic</span>
+              </>
+            ) : transcribing ? (
               <>
                 <Dot kind="ink" size={6} />
                 <span className="hidden sm:inline">Live</span>

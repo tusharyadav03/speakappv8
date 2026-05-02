@@ -73,20 +73,51 @@ export default function App() {
   useEffect(() => {
     const s = getSocket();
     sk.current = s;
-    s.on("connect", () => setOk(true));
-    s.on("disconnect", () => setOk(false));
-    s.on("event_created", (d) => {
+
+    const onConnect = () => setOk(true);
+    const onDisconnect = (reason) => {
+      setOk(false);
+      // Don't alert on normal disconnects — socket.io will auto-reconnect
+      if (reason === "io server disconnect") {
+        // Server forced disconnect — likely event ended or server restarted
+        console.warn("Server disconnected");
+      }
+    };
+    const onEventCreated = (d) => {
       setRoom(d);
       setLoadingMsg("Launching event...");
       setLoading(true);
       setTimeout(() => { setView("dash"); setLoading(false); }, 400);
-    });
-    s.on("room_data", (d) => setRoom((p) => ({ ...p, ...d })));
-    s.on("event_ended", ({ reason }) => { alert(`Event ended${reason ? ": " + reason : ""}`); setView("landing"); setRoom(null); });
-    s.on("error", (m) => alert(m));
+    };
+    const onRoomData = (d) => setRoom((p) => ({ ...p, ...d }));
+    const onEventEnded = ({ reason } = {}) => {
+      alert(`Event ended${reason ? ": " + reason : ""}`);
+      setView("landing");
+      setRoom(null);
+    };
+    const onError = (m) => {
+      if (typeof m === "string") alert(m);
+      else console.error("Socket error:", m);
+    };
+
+    s.on("connect", onConnect);
+    s.on("disconnect", onDisconnect);
+    s.on("event_created", onEventCreated);
+    s.on("room_data", onRoomData);
+    s.on("event_ended", onEventEnded);
+    s.on("error", onError);
+
     setOk(s.connected);
     if (new URLSearchParams(window.location.search).get("room")) setView("join");
-    return () => { s.off("connect"); s.off("disconnect"); s.off("event_created"); s.off("room_data"); s.off("event_ended"); s.off("error"); };
+
+    return () => {
+      s.off("connect", onConnect);
+      s.off("disconnect", onDisconnect);
+      s.off("event_created", onEventCreated);
+      s.off("room_data", onRoomData);
+      s.off("event_ended", onEventEnded);
+      s.off("error", onError);
+    };
   }, []);
 
   const create = (d) => { if (!ok) return alert("Connecting..."); sk.current.emit("create_event", d); };
