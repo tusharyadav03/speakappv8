@@ -178,7 +178,6 @@ export default function HostDash({ room, onEnd }) {
     sk.on("webrtc_offer", async ({ from, offer }) => {
       try {
         if (pc.current) {
-          try { if (pc.current._silentCtx) pc.current._silentCtx.close(); } catch {}
           pc.current.close();
           pc.current = null;
         }
@@ -215,50 +214,16 @@ export default function HostDash({ room, onEnd }) {
         c.oniceconnectionstatechange = () => {
           if (pc.current !== c) return;
           const state = c.iceConnectionState;
-          if (state === "failed") {
-            console.warn("Host ICE failed, restarting...");
-            c.restartIce();
-          }
+          if (state === "failed") c.restartIce();
           if (state === "disconnected") {
             setTimeout(() => {
-              if (pc.current === c && c.iceConnectionState === "disconnected") {
-                console.warn("Host ICE still disconnected, restarting...");
-                c.restartIce();
-              }
+              if (pc.current === c && c.iceConnectionState === "disconnected") c.restartIce();
             }, 5000);
           }
         };
 
-        // MUST set remote description FIRST so PeerConnection knows the media layout
         await c.setRemoteDescription(new RTCSessionDescription(offer));
-        if (pc.current !== c) return; // replaced during async
-
-        // ── Add silent audio track for echo cancellation ──
-        // Done AFTER setRemoteDescription so it uses the existing audio m-line
-        // (sendrecv from guest's offer) instead of creating a conflicting one.
-        // This makes connection bidirectional → guest's AEC can cancel echo.
-        try {
-          const silentCtx = new AudioContext();
-          const osc = silentCtx.createOscillator();
-          const gain = silentCtx.createGain();
-          gain.gain.value = 0;
-          osc.connect(gain);
-          const dest = silentCtx.createMediaStreamDestination();
-          gain.connect(dest);
-          osc.start();
-          // Find the existing audio transceiver and replace its sender track
-          const audioTransceiver = c.getTransceivers().find(
-            (t) => t.receiver.track?.kind === "audio"
-          );
-          if (audioTransceiver && audioTransceiver.sender) {
-            await audioTransceiver.sender.replaceTrack(dest.stream.getTracks()[0]);
-            audioTransceiver.direction = "sendrecv";
-          }
-          c._silentCtx = silentCtx;
-        } catch (silentErr) {
-          console.warn("Silent track setup failed:", silentErr.message);
-        }
-
+        if (pc.current !== c) return;
         const ans = await c.createAnswer();
         await c.setLocalDescription(ans);
         sk.emit("webrtc_answer", { roomId: room.id, answer: ans, to: from });
@@ -286,7 +251,6 @@ export default function HostDash({ room, onEnd }) {
         "webrtc_ice",
       ].forEach((e) => sk.off(e));
       if (pc.current) {
-        try { if (pc.current._silentCtx) pc.current._silentCtx.close(); } catch {}
         pc.current.close();
         pc.current = null;
       }
