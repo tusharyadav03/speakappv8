@@ -148,10 +148,12 @@ export default function Attendee({ room, user, onExit }) {
     try {
       const ms = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true },
           channelCount: 1,
+          sampleRate: { ideal: 16000 }, // speech-optimized sample rate
+          latency: { ideal: 0.01 },     // low latency for real-time
         },
       });
       stream.current = ms;
@@ -165,24 +167,45 @@ export default function Attendee({ room, user, onExit }) {
 
         if (audioCtx.state === "running") {
           const source = audioCtx.createMediaStreamSource(ms);
+
+          // High-pass filter: remove low-frequency rumble + speaker bleed
           const highpass = audioCtx.createBiquadFilter();
           highpass.type = "highpass";
-          highpass.frequency.value = 100;
-          highpass.Q.value = 0.7;
+          highpass.frequency.value = 150; // raised from 100 to cut more room echo
+          highpass.Q.value = 0.8;
 
+          // Noise gate via aggressive compressor — kills low-level echo/feedback
+          // Anything below -35dB gets crushed (speaker bleed is typically quiet)
+          const noiseGate = audioCtx.createDynamicsCompressor();
+          noiseGate.threshold.value = -35;   // gate threshold — echo below this gets killed
+          noiseGate.knee.value = 2;          // hard knee = sharp gate
+          noiseGate.ratio.value = 20;        // very high ratio = gate behavior
+          noiseGate.attack.value = 0.001;    // fast attack — don't let echo through
+          noiseGate.release.value = 0.05;    // fast release — open quick when speaking
+
+          // Main compressor for voice normalization
           const compressor = audioCtx.createDynamicsCompressor();
-          compressor.threshold.value = -50;
+          compressor.threshold.value = -45;
           compressor.knee.value = 10;
-          compressor.ratio.value = 12;
+          compressor.ratio.value = 8;
           compressor.attack.value = 0.003;
           compressor.release.value = 0.15;
 
+          // Notch filter: cut common speaker resonance frequencies
+          const notch = audioCtx.createBiquadFilter();
+          notch.type = "notch";
+          notch.frequency.value = 250; // common room echo frequency
+          notch.Q.value = 2;
+
           const makeupGain = audioCtx.createGain();
-          makeupGain.gain.value = 1.3;
+          makeupGain.gain.value = 1.4;
 
           const dest = audioCtx.createMediaStreamDestination();
+          // Chain: mic → highpass → noise gate → notch → compressor → gain → output
           source.connect(highpass);
-          highpass.connect(compressor);
+          highpass.connect(noiseGate);
+          noiseGate.connect(notch);
+          notch.connect(compressor);
           compressor.connect(makeupGain);
           makeupGain.connect(dest);
 
